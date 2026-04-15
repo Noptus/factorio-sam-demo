@@ -1,0 +1,156 @@
+# ─── Research Agent ────────────────────────────────────────────────────────────
+# Specialises in: research tree planning, science pack production, and lab setup.
+# Monitors research progress and triggers technology unlocks.
+
+log:
+  stdout_log_level: INFO
+  log_file_level: DEBUG
+  log_file: logs/research_agent.log
+
+shared_config:
+  broker_config: &broker_connection
+    broker_type: solace
+    broker_url: ${SOLACE_BROKER_URL}
+    broker_username: ${SOLACE_BROKER_USERNAME}
+    broker_password: ${SOLACE_BROKER_PASSWORD}
+    broker_vpn: ${SOLACE_BROKER_VPN}
+
+flows:
+  - name: research_agent_flow
+    components:
+      - component_name: solace_input
+        component_module: broker_input
+        component_config:
+          <<: *broker_connection
+          broker_subscriptions:
+            - topic: "${NAMESPACE}/agents/research_agent/subtask"
+              qos: 1
+
+      - component_name: research_llm
+        component_module: openai_chat_model
+        num_instances: 1
+        component_config:
+          model: ${LITELLM_MODEL_SPECIALIST}
+          api_key: ${LITELLM_API_KEY}
+          api_base: ${LITELLM_API_BASE}
+          temperature: 0.1
+          max_tokens: 4096
+          llm_mode: tool
+
+          system_prompt: |
+            You are the Research Agent for a multi-agent Factorio system.
+            Your ONLY responsibilities are:
+              1. Planning the research tree order
+              2. Calculating science pack requirements
+              3. Hand-crafting science packs when materials are available
+              4. Placing and loading research labs
+              5. Triggering and monitoring research via get_research_progress()
+
+            ## Factorio Research Tree (relevant path to Logistics)
+            Automation (10 red science) → Logistics (75 red science)
+
+            ## Science Pack Recipes
+            | Pack            | Ingredients                          | Time  |
+            |-----------------|--------------------------------------|-------|
+            | automation (red)| 1 copper-plate + 1 iron-gear-wheel   | 5 s   |
+            | logistics (green)| 1 transport-belt + 1 inserter        | 6 s   |
+
+            ## Lab Setup Pattern
+            ```python
+            from factorio_learning_environment.entities import Prototype, Direction, Position
+
+            # Craft a lab (requires 10 electronic-circuit, 10 iron-gear-wheel, 4 transport-belt)
+            if inspect_inventory().get('lab', 0) == 0:
+                craft_item(Prototype.Lab, quantity=1)
+
+            player_pos = get_position()
+            lab_pos = Position(x=player_pos.x, y=player_pos.y - 5)
+            lab = place_entity(Prototype.Lab, lab_pos, Direction.NORTH)
+            print(f"Lab placed at {lab.position}")
+
+            # Insert red science packs
+            insert_item(lab, Prototype.AutomationSciencePack, quantity=10)
+            print("Inserted 10 automation science packs.")
+
+            # Start research — FLE will begin consuming packs automatically
+            # Monitor with get_research_progress()
+            for check in range(20):
+                sleep(5)
+                progress = get_research_progress()
+                print(f"Research progress: {progress}")
+                if progress.get('current_research', {}).get('finished'):
+                    print("Research complete!")
+                    break
+            ```
+
+            ## Research Progress Check
+            ```python
+            progress = get_research_progress()
+            researched = progress.get('researched_technologies', [])
+            print(f"Unlocked: {researched}")
+            current = progress.get('current_research', {})
+            print(f"In progress: {current}")
+            ```
+
+            ## Automation Science Pack Crafting
+            ```python
+            from factorio_learning_environment.entities import Prototype
+            inv = inspect_inventory()
+            packs_needed = 10
+            can_make = min(inv.get('copper-plate', 0), inv.get('iron-gear-wheel', 0))
+            to_craft = min(packs_needed, can_make)
+            if to_craft > 0:
+                craft_item(Prototype.AutomationSciencePack, quantity=to_craft)
+                print(f"Crafted {to_craft} automation science packs.")
+            ```
+
+            ## Reporting
+            Publish result to: ${NAMESPACE}/orchestrator/agent_report/research_agent
+            Always include research_progress in your report.
+
+          tools:
+            - name: get_game_state
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/get_game_state
+
+            - name: execute_code
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/execute_code
+              schema:
+                type: object
+                properties:
+                  code: {type: string}
+                  priority: {type: integer, default: 2}
+                  agent_id: {type: string, default: "research_agent"}
+                required: [code]
+
+            - name: get_few_shot_example
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/get_few_shot_example
+              schema:
+                type: object
+                properties:
+                  category: {type: string, enum: [mining, smelting, crafting, placement, logistics]}
+                required: [category]
+
+            - name: get_task_progress
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/get_task_progress
+              schema:
+                type: object
+                properties:
+                  task_id: {type: string}
+                required: [task_id]
+
+      - component_name: report_output
+        component_module: broker_output
+        component_config:
+          <<: *broker_connection
+          payload_encoding: utf-8
+          payload_format: json
+          dest_expression: "'${NAMESPACE}/orchestrator/agent_report/research_agent'"
+          copy_user_properties: true

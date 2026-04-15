@@ -1,0 +1,163 @@
+# ─── Orchestrator Agent ────────────────────────────────────────────────────────
+# The master coordinator.  Receives lab-play tasks, decomposes them into
+# subtasks, routes subtasks to specialist agents via Solace topics, monitors
+# progress, and invokes reflection_agent on failure.
+#
+# solace_ai_connector YAML format
+
+log:
+  stdout_log_level: INFO
+  log_file_level: DEBUG
+  log_file: logs/orchestrator.log
+
+shared_config:
+  broker_config: &broker_connection
+    broker_type: solace
+    broker_url: ${SOLACE_BROKER_URL}
+    broker_username: ${SOLACE_BROKER_USERNAME}
+    broker_password: ${SOLACE_BROKER_PASSWORD}
+    broker_vpn: ${SOLACE_BROKER_VPN}
+
+flows:
+  # ── Inbound: receive task assignments from the runner ────────────────────────
+  - name: orchestrator_input
+    components:
+      - component_name: solace_input
+        component_module: broker_input
+        component_config:
+          <<: *broker_connection
+          broker_subscriptions:
+            - topic: "${NAMESPACE}/orchestrator/task"
+              qos: 1
+            - topic: "${NAMESPACE}/orchestrator/agent_report/>"
+              qos: 1
+
+      - component_name: orchestrator_llm
+        component_module: openai_chat_model
+        num_instances: 1
+        component_config:
+          model: ${LITELLM_MODEL_ORCHESTRATOR}
+          api_key: ${LITELLM_API_KEY}
+          api_base: ${LITELLM_API_BASE}
+          temperature: 0.15
+          max_tokens: 8192
+          llm_mode: tool
+          stream_to_flow: orchestrator_output
+
+          system_prompt: |
+            You are the Orchestrator for a multi-agent Factorio playing system.
+            Your goal is to BEAT the FLE lab-play benchmark of 7/24 tasks — aim for 15+.
+
+            ## Your Role
+            You receive a task from the task list (get_lab_tasks), decompose it into an
+            ordered sequence of subtasks, and assign each subtask to the right specialist
+            agent by publishing to Solace topics.
+
+            ## Specialist Agents and Their Capabilities
+            - resource_agent   : mining raw resources, manual smelting, hand crafting
+            - blueprint_agent  : entity placement, factory layout, spatial planning
+            - logistics_agent  : belts, inserters, power infrastructure, fluid pipes
+            - research_agent   : science pack production, lab setup, technology research
+            - reflection_agent : error analysis and recovery (call when any agent reports failure)
+
+            ## Workflow for each task
+            1. Call get_lab_tasks() to get all task definitions.
+            2. Call get_game_state() to understand the current situation.
+            3. Call get_task_progress(task_id) to check if the task is already started.
+            4. Decompose the task: identify prerequisites → atomic subtasks → assign agents.
+            5. Monitor agent_reports.  If an agent reports failure, immediately assign
+               reflection_agent to analyse and fix, then retry the original subtask.
+            6. After each completed subtask, re-check game_state and adjust the plan.
+
+            ## Publishing subtasks to agents
+            Publish a JSON message to the topic:
+              ${NAMESPACE}/agents/{agent_name}/subtask
+            Message format:
+              {
+                "subtask_id": "<uuid>",
+                "parent_task_id": "<task_id>",
+                "instruction": "<clear, specific instruction>",
+                "context": {<relevant game state fields>},
+                "priority": 1
+              }
+
+            ## Error handling
+            - If a subtask fails, ALWAYS call reflection_agent before retrying.
+            - Maximum 3 retries per subtask.  After 3 failures, mark task as failed and move on.
+            - Never get stuck in a loop on a single action.
+
+            ## Code quality rules
+            - Call get_few_shot_example(category) BEFORE writing code for an unfamiliar category.
+            - ALL game interactions go through execute_code() — never attempt raw game API calls.
+            - If inventory is insufficient, route back to resource_agent first.
+
+            ## Output format
+            When publishing to agents, use structured JSON.
+            When reporting progress to the runner, summarise: task, status, subtasks_done, subtasks_total.
+
+          tools:
+            - name: get_game_state
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/get_game_state
+              description: "Get current game state from broker cache."
+
+            - name: execute_code
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/execute_code
+              description: "Execute Python code in FLE.  Use sparingly — prefer delegating to specialists."
+              schema:
+                type: object
+                properties:
+                  code: {type: string}
+                  priority: {type: integer, default: 1}
+                  agent_id: {type: string, default: "orchestrator"}
+                required: [code]
+
+            - name: get_lab_tasks
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/get_lab_tasks
+              description: "Get all 24 FLE lab-play task definitions."
+
+            - name: get_task_progress
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/get_task_progress
+              description: "Check progress toward a task goal."
+              schema:
+                type: object
+                properties:
+                  task_id: {type: string}
+                required: [task_id]
+
+            - name: get_few_shot_example
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/get_few_shot_example
+              description: "Get verified FLE code examples."
+              schema:
+                type: object
+                properties:
+                  category: {type: string, enum: [mining, smelting, crafting, placement, logistics]}
+                required: [category]
+
+      - component_name: orchestrator_output
+        component_module: broker_output
+        component_config:
+          <<: *broker_connection
+          payload_encoding: utf-8
+          payload_format: json
+          dest_expression: "input.user_properties:reply_topic"
+          copy_user_properties: true
+
+  # ── Outbound: publish subtasks to specialist agents ──────────────────────────
+  - name: orchestrator_dispatch
+    components:
+      - component_name: dispatch_output
+        component_module: broker_output
+        component_config:
+          <<: *broker_connection
+          payload_encoding: utf-8
+          payload_format: json

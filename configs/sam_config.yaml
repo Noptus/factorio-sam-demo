@@ -1,0 +1,118 @@
+# ─── Solace Agent Mesh (SAM) Configuration ────────────────────────────────────
+# Master configuration for the Factorio multi-agent system.
+# This file is passed to the SAM CLI: sam run configs/sam_config.yaml
+# (or: solace-agent-mesh run configs/sam_config.yaml)
+#
+# Architecture:
+#   Factorio Game ← env.step() ← Action Broker (port 8765)
+#                                     ↑
+#                               MCP Server (port 8766)
+#                                     ↑
+#   Solace Broker ←─── topic routing ─── SAM Agents
+#       ↑
+#   [orchestrator, resource_agent, blueprint_agent,
+#    logistics_agent, research_agent, reflection_agent]
+
+version: "1.0"
+
+# ─── Environment variables sourced from .env ──────────────────────────────────
+# Ensure these are set before running:
+#   LITELLM_API_KEY, LITELLM_API_BASE, LITELLM_MODEL_ORCHESTRATOR,
+#   LITELLM_MODEL_SPECIALIST, SOLACE_BROKER_URL, SOLACE_BROKER_USERNAME,
+#   SOLACE_BROKER_PASSWORD, SOLACE_BROKER_VPN, NAMESPACE,
+#   ACTION_BROKER_URL, MCP_SERVER_URL
+
+# ─── Shared broker config (referenced by all agents) ─────────────────────────
+shared_config:
+  broker_config: &broker_connection
+    broker_type: solace
+    broker_url: ${SOLACE_BROKER_URL}
+    broker_username: ${SOLACE_BROKER_USERNAME}
+    broker_password: ${SOLACE_BROKER_PASSWORD}
+    broker_vpn: ${SOLACE_BROKER_VPN}
+    reconnect_retries: 5
+    reconnect_retry_wait_ms: 2000
+
+# ─── Agent config files ────────────────────────────────────────────────────────
+agents:
+  - config_file: agents/orchestrator.yaml
+    enabled: true
+    description: "Master coordinator — decomposes tasks and routes to specialists"
+
+  - config_file: agents/resource_agent.yaml
+    enabled: true
+    description: "Mining, smelting, hand crafting"
+
+  - config_file: agents/blueprint_agent.yaml
+    enabled: true
+    description: "Entity placement and factory layout"
+
+  - config_file: agents/logistics_agent.yaml
+    enabled: true
+    description: "Belts, inserters, power infrastructure"
+
+  - config_file: agents/research_agent.yaml
+    enabled: true
+    description: "Research tree, science packs, labs"
+
+  - config_file: agents/reflection_agent.yaml
+    enabled: true
+    description: "Error recovery and code correction"
+
+# ─── Topic namespace and routing ──────────────────────────────────────────────
+namespace: ${NAMESPACE}
+
+# Topic routing table (documentation — Solace handles routing via subscriptions)
+topic_routing:
+  # Runner → Orchestrator
+  task_submission:     "${NAMESPACE}/orchestrator/task"
+  # Orchestrator → Specialists
+  resource_subtask:    "${NAMESPACE}/agents/resource_agent/subtask"
+  blueprint_subtask:   "${NAMESPACE}/agents/blueprint_agent/subtask"
+  logistics_subtask:   "${NAMESPACE}/agents/logistics_agent/subtask"
+  research_subtask:    "${NAMESPACE}/agents/research_agent/subtask"
+  reflection_analyse:  "${NAMESPACE}/agents/reflection_agent/analyse"
+  # All agents → Orchestrator (wildcarded)
+  agent_reports:       "${NAMESPACE}/orchestrator/agent_report/>"
+
+# ─── MCP server configuration ─────────────────────────────────────────────────
+mcp_servers:
+  - name: factorio-mcp
+    url: ${MCP_SERVER_URL}
+    protocol: json-rpc
+    health_check_endpoint: /health
+    tools:
+      - get_game_state
+      - execute_code
+      - get_lab_tasks
+      - get_few_shot_example
+      - get_task_progress
+
+# ─── Action Broker configuration ──────────────────────────────────────────────
+action_broker:
+  url: ${ACTION_BROKER_URL}
+  health_check_endpoint: /health
+  max_queue_depth: 100
+  default_action_timeout_s: 30
+
+# ─── LLM routing ──────────────────────────────────────────────────────────────
+llm:
+  provider: litellm
+  api_key: ${LITELLM_API_KEY}
+  api_base: ${LITELLM_API_BASE}
+  models:
+    orchestrator: ${LITELLM_MODEL_ORCHESTRATOR}
+    specialist:   ${LITELLM_MODEL_SPECIALIST}
+
+# ─── Observability ────────────────────────────────────────────────────────────
+logging:
+  level: ${LOG_LEVEL:-INFO}
+  format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+  log_dir: logs/
+  agents:
+    orchestrator:   logs/orchestrator.log
+    resource_agent: logs/resource_agent.log
+    blueprint_agent: logs/blueprint_agent.log
+    logistics_agent: logs/logistics_agent.log
+    research_agent:  logs/research_agent.log
+    reflection_agent: logs/reflection_agent.log

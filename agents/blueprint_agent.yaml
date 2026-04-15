@@ -1,0 +1,132 @@
+# ─── Blueprint Agent ───────────────────────────────────────────────────────────
+# Specialises in: factory layout, entity placement, and spatial planning.
+# Designs WHERE and HOW entities are placed to create efficient production lines.
+
+log:
+  stdout_log_level: INFO
+  log_file_level: DEBUG
+  log_file: logs/blueprint_agent.log
+
+shared_config:
+  broker_config: &broker_connection
+    broker_type: solace
+    broker_url: ${SOLACE_BROKER_URL}
+    broker_username: ${SOLACE_BROKER_USERNAME}
+    broker_password: ${SOLACE_BROKER_PASSWORD}
+    broker_vpn: ${SOLACE_BROKER_VPN}
+
+flows:
+  - name: blueprint_agent_flow
+    components:
+      - component_name: solace_input
+        component_module: broker_input
+        component_config:
+          <<: *broker_connection
+          broker_subscriptions:
+            - topic: "${NAMESPACE}/agents/blueprint_agent/subtask"
+              qos: 1
+
+      - component_name: blueprint_llm
+        component_module: openai_chat_model
+        num_instances: 1
+        component_config:
+          model: ${LITELLM_MODEL_SPECIALIST}
+          api_key: ${LITELLM_API_KEY}
+          api_base: ${LITELLM_API_BASE}
+          temperature: 0.1
+          max_tokens: 4096
+          llm_mode: tool
+
+          system_prompt: |
+            You are the Blueprint Agent for a multi-agent Factorio system.
+            Your ONLY responsibilities are:
+              1. Placing entities (furnaces, drills, assemblers, labs, poles)
+              2. Calculating valid placement positions (no collisions, on valid tiles)
+              3. Designing compact, efficient factory layouts
+              4. Verifying placements succeeded via get_game_state()
+
+            ## Entity Size Reference
+            - stone-furnace:          2×2 tiles
+            - burner-mining-drill:    2×2 tiles
+            - electric-mining-drill:  3×3 tiles
+            - assembling-machine-1:   3×3 tiles
+            - lab:                    3×3 tiles
+            - boiler:                 2×3 tiles
+            - steam-engine:           3×5 tiles
+            - offshore-pump:          1×2 tiles
+            - small-electric-pole:    1×1 tiles
+
+            ## Placement Rules
+            1. ALWAYS call get_game_state() first to see existing entities.
+            2. Use get_entities() to check for collisions at the target position.
+            3. Place drills ON the ore patch centre — FLE snaps to valid tile.
+            4. Leave space between entities for belts and inserters (1-2 tile gaps).
+            5. Direction controls the output/input face:
+               - BurnerDrill Direction.NORTH → ore output on north face
+               - StoneFurnace direction doesn't affect ore processing
+               - Inserter direction = direction it THROWS items
+
+            ## Standard Layout Pattern (mine-smelt line)
+            ```
+            [Drill] → [belt N] → [belt N] → [belt N] → [Furnace]
+                                                         [Insert-S from belt]
+                                                         [Insert-N to output belt]
+            ```
+
+            ## Placement Code Pattern
+            ```python
+            from factorio_learning_environment.entities import Prototype, Direction, Position
+            # 1. Find ore patch
+            patches = get_resource_patches('iron-ore', radius=50)
+            patch = min(patches, key=lambda p: p.position.distance(get_position()))
+            # 2. Place drill on patch
+            drill = place_entity(Prototype.BurnerMiningDrill, patch.position, Direction.NORTH)
+            insert_item(drill, Prototype.Coal, quantity=20)
+            # 3. Place furnace 5 tiles north
+            furnace_pos = Position(x=patch.position.x, y=patch.position.y - 5)
+            furnace = place_entity(Prototype.StoneFurnace, furnace_pos, Direction.NORTH)
+            ```
+
+            ## Reporting
+            Publish result to: ${NAMESPACE}/orchestrator/agent_report/blueprint_agent
+            Format: {"subtask_id": "...", "agent": "blueprint_agent",
+                     "status": "success"|"failure",
+                     "placed_entities": [{"type": "...", "position": {...}}],
+                     "stderr": "..."}
+
+          tools:
+            - name: get_game_state
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/get_game_state
+
+            - name: execute_code
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/execute_code
+              schema:
+                type: object
+                properties:
+                  code: {type: string}
+                  priority: {type: integer, default: 2}
+                  agent_id: {type: string, default: "blueprint_agent"}
+                required: [code]
+
+            - name: get_few_shot_example
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/get_few_shot_example
+              schema:
+                type: object
+                properties:
+                  category: {type: string, enum: [mining, smelting, crafting, placement, logistics]}
+                required: [category]
+
+      - component_name: report_output
+        component_module: broker_output
+        component_config:
+          <<: *broker_connection
+          payload_encoding: utf-8
+          payload_format: json
+          dest_expression: "'${NAMESPACE}/orchestrator/agent_report/blueprint_agent'"
+          copy_user_properties: true

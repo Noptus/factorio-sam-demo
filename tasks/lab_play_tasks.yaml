@@ -1,0 +1,371 @@
+# FLE Lab-Play Benchmark Task Definitions
+# =========================================
+# 24 tasks across 5 complexity tiers that mirror the published FLE lab-play benchmark.
+# The baseline best-single-agent score is 7/24.  This multi-agent system targets 15+.
+#
+# task_id        : unique snake_case identifier
+# name           : human-readable name
+# description    : what the agent must do
+# type           : gather | smelt | craft | place | automate | research | build
+# target_entity  : FLE item/entity name (matches Prototype enum and inventory keys)
+# target_count   : how many units are required
+# time_limit_s   : wall-clock seconds before the task is marked failed
+# complexity_tier: 1 (trivial) … 5 (expert)
+# required_items : map of {item: count} that must be in inventory before starting
+# hints          : list of strategy hints for agents
+# assigned_agents: which specialist agent(s) handle this task
+
+tasks:
+
+  # ── Tier 1: Raw Resource Gathering ──────────────────────────────────────────
+
+  - task_id: gather_iron_ore
+    name: "Gather Iron Ore"
+    description: "Collect 50 units of iron-ore from a nearby patch."
+    type: gather
+    target_entity: iron-ore
+    target_count: 50
+    time_limit_s: 120
+    complexity_tier: 1
+    required_items: {}
+    hints:
+      - "Use get_resource_patches('iron-ore', radius=50) to locate the nearest patch."
+      - "Call move_to() then harvest_resource() with quantity=50."
+    assigned_agents: [resource_agent]
+
+  - task_id: gather_copper_ore
+    name: "Gather Copper Ore"
+    description: "Collect 50 units of copper-ore."
+    type: gather
+    target_entity: copper-ore
+    target_count: 50
+    time_limit_s: 120
+    complexity_tier: 1
+    required_items: {}
+    hints:
+      - "Same pattern as iron-ore; use 'copper-ore' as the resource name."
+    assigned_agents: [resource_agent]
+
+  - task_id: gather_coal
+    name: "Gather Coal"
+    description: "Collect 80 units of coal for fuelling furnaces and drills."
+    type: gather
+    target_entity: coal
+    target_count: 80
+    time_limit_s: 120
+    complexity_tier: 1
+    required_items: {}
+    hints:
+      - "Coal is needed for every burner entity.  Gather extra."
+    assigned_agents: [resource_agent]
+
+  - task_id: gather_stone
+    name: "Gather Stone"
+    description: "Collect 30 units of stone (needed to craft stone furnaces)."
+    type: gather
+    target_entity: stone
+    target_count: 30
+    time_limit_s: 120
+    complexity_tier: 1
+    required_items: {}
+    hints:
+      - "Each stone furnace costs 5 stone.  30 stone = 6 furnaces."
+    assigned_agents: [resource_agent]
+
+  # ── Tier 2: Basic Processing ─────────────────────────────────────────────────
+
+  - task_id: smelt_iron_plates
+    name: "Smelt Iron Plates"
+    description: "Produce 20 iron-plate from iron-ore using a stone furnace."
+    type: smelt
+    target_entity: iron-plate
+    target_count: 20
+    time_limit_s: 300
+    complexity_tier: 2
+    required_items:
+      iron-ore: 20
+      coal: 10
+      stone: 5
+    hints:
+      - "Craft a stone-furnace (5 stone), place it, insert coal fuel, insert ore, sleep(75), extract plates."
+      - "Each iron-ore → 1 iron-plate in 3.2 s at base furnace speed."
+    assigned_agents: [resource_agent]
+
+  - task_id: smelt_copper_plates
+    name: "Smelt Copper Plates"
+    description: "Produce 20 copper-plate."
+    type: smelt
+    target_entity: copper-plate
+    target_count: 20
+    time_limit_s: 300
+    complexity_tier: 2
+    required_items:
+      copper-ore: 20
+      coal: 10
+      stone: 5
+    hints:
+      - "Identical pattern to iron smelting — just swap IronOre for CopperOre."
+    assigned_agents: [resource_agent]
+
+  - task_id: craft_iron_gear_wheels
+    name: "Craft Iron Gear Wheels"
+    description: "Craft 10 iron-gear-wheel from iron plates."
+    type: craft
+    target_entity: iron-gear-wheel
+    target_count: 10
+    time_limit_s: 120
+    complexity_tier: 2
+    required_items:
+      iron-plate: 20
+    hints:
+      - "Recipe: 2 iron-plate → 1 iron-gear-wheel.  craft_item(Prototype.IronGearWheel, 10)."
+    assigned_agents: [resource_agent]
+
+  - task_id: craft_copper_cable
+    name: "Craft Copper Cable"
+    description: "Craft 20 copper-cable."
+    type: craft
+    target_entity: copper-cable
+    target_count: 20
+    time_limit_s: 120
+    complexity_tier: 2
+    required_items:
+      copper-plate: 10
+    hints:
+      - "Recipe: 1 copper-plate → 2 copper-cable.  10 plates gives 20 cables."
+    assigned_agents: [resource_agent]
+
+  - task_id: craft_electronic_circuits
+    name: "Craft Electronic Circuits"
+    description: "Craft 10 electronic-circuit (green circuits)."
+    type: craft
+    target_entity: electronic-circuit
+    target_count: 10
+    time_limit_s: 180
+    complexity_tier: 2
+    required_items:
+      iron-plate: 10
+      copper-plate: 15
+    hints:
+      - "Recipe: 3 copper-cable + 1 iron-plate → 1 circuit.  Sub-craft cables first."
+    assigned_agents: [resource_agent]
+
+  # ── Tier 3: Entity Placement ──────────────────────────────────────────────────
+
+  - task_id: place_stone_furnace
+    name: "Place a Stone Furnace"
+    description: "Craft and place a stone furnace near a coal and iron-ore deposit."
+    type: place
+    target_entity: stone-furnace
+    target_count: 1
+    time_limit_s: 180
+    complexity_tier: 3
+    required_items:
+      stone: 5
+    hints:
+      - "craft_item(Prototype.StoneFurnace, 1) then place_entity() 2 tiles east of player."
+      - "Verify placement with get_entities(Prototype.StoneFurnace)."
+    assigned_agents: [blueprint_agent]
+
+  - task_id: place_burner_mining_drill
+    name: "Place a Burner Mining Drill"
+    description: "Place a fuelled burner-mining-drill on an iron-ore patch."
+    type: place
+    target_entity: burner-mining-drill
+    target_count: 1
+    time_limit_s: 240
+    complexity_tier: 3
+    required_items:
+      iron-plate: 3
+      iron-gear-wheel: 3
+      stone-furnace: 1
+    hints:
+      - "Drill must be placed ON the ore patch, not next to it."
+      - "After placing, insert coal fuel so it starts immediately."
+    assigned_agents: [blueprint_agent]
+
+  - task_id: setup_burner_drill_and_furnace
+    name: "Set Up Automated Burner Drill + Furnace"
+    description: "Place a burner drill on iron-ore feeding a stone furnace, producing iron plates without player interaction."
+    type: automate
+    target_entity: iron-plate
+    target_count: 10
+    time_limit_s: 600
+    complexity_tier: 3
+    required_items:
+      coal: 40
+      iron-plate: 6
+      iron-gear-wheel: 3
+      stone-furnace: 1
+    hints:
+      - "Drill → belt/inserter → furnace → output belt.  Use blueprint_agent for layout."
+      - "Fuel both the drill and inserter with coal."
+    assigned_agents: [blueprint_agent, logistics_agent]
+
+  # ── Tier 4: Automation & Logistics ───────────────────────────────────────────
+
+  - task_id: craft_automation_science_packs
+    name: "Craft Automation Science Packs"
+    description: "Craft 5 automation-science-pack (red science)."
+    type: craft
+    target_entity: automation-science-pack
+    target_count: 5
+    time_limit_s: 300
+    complexity_tier: 4
+    required_items:
+      copper-plate: 5
+      iron-gear-wheel: 5
+    hints:
+      - "Recipe: 1 copper-plate + 1 iron-gear-wheel → 1 automation-science-pack."
+    assigned_agents: [resource_agent, research_agent]
+
+  - task_id: build_research_lab
+    name: "Build a Research Lab"
+    description: "Craft and place a lab, insert automation science packs, and start research."
+    type: place
+    target_entity: lab
+    target_count: 1
+    time_limit_s: 600
+    complexity_tier: 4
+    required_items:
+      electronic-circuit: 10
+      iron-gear-wheel: 10
+      transport-belt: 4
+    hints:
+      - "Lab needs science packs inserted, then research is triggered via set_research() or equivalent."
+    assigned_agents: [research_agent, blueprint_agent]
+
+  - task_id: research_automation
+    name: "Research Automation Technology"
+    description: "Complete the Automation research (unlocks assembling machines)."
+    type: research
+    target_entity: automation
+    target_count: 1
+    time_limit_s: 900
+    complexity_tier: 4
+    required_items: {}
+    hints:
+      - "Requires: 1 lab, 10 automation-science-packs (red).  Run get_research_progress() to monitor."
+      - "Use research_agent to plan the science pack chain."
+    assigned_agents: [research_agent]
+
+  - task_id: build_belt_mining_line
+    name: "Build a Belt-Driven Mining Line"
+    description: "Connect a burner drill to a furnace via transport belts and inserters."
+    type: build
+    target_entity: transport-belt
+    target_count: 8
+    time_limit_s: 900
+    complexity_tier: 4
+    required_items:
+      transport-belt: 8
+      burner-inserter: 2
+      coal: 40
+    hints:
+      - "Belt direction must match item flow direction."
+      - "Inserter faces TOWARD the container it is depositing into."
+    assigned_agents: [logistics_agent, blueprint_agent]
+
+  - task_id: setup_electric_power
+    name: "Set Up Electric Power Infrastructure"
+    description: "Build an offshore pump → boiler → steam engine chain producing ≥900 kW."
+    type: build
+    target_entity: steam-engine
+    target_count: 1
+    time_limit_s: 900
+    complexity_tier: 4
+    required_items:
+      offshore-pump: 1
+      boiler: 1
+      steam-engine: 1
+      pipe: 6
+      small-electric-pole: 4
+    hints:
+      - "Place offshore-pump on water edge, boiler 3 tiles away, steam engine 4 tiles from boiler."
+      - "Connect with pipes.  Fuel boiler with coal."
+    assigned_agents: [logistics_agent, blueprint_agent]
+
+  # ── Tier 5: Expert Multi-Step Automation ─────────────────────────────────────
+
+  - task_id: full_iron_automation
+    name: "Fully Automated Iron Plate Production"
+    description: "Set up an automated mine-smelt chain that produces iron plates without player input, outputting ≥5 plates/min."
+    type: automate
+    target_entity: iron-plate
+    target_count: 5
+    time_limit_s: 1800
+    complexity_tier: 5
+    required_items: {}
+    hints:
+      - "Use electric mining drill (requires power) for higher throughput."
+      - "Orchestrator should assign: resource_agent (materials), blueprint_agent (layout), logistics_agent (connections)."
+    assigned_agents: [orchestrator, resource_agent, blueprint_agent, logistics_agent]
+
+  - task_id: research_logistics
+    name: "Research Logistics Technology"
+    description: "Complete the Logistics research (unlocks fast belts and more)."
+    type: research
+    target_entity: logistics
+    target_count: 1
+    time_limit_s: 1800
+    complexity_tier: 5
+    required_items: {}
+    hints:
+      - "Requires: 75 automation-science-packs.  You will need an automated science production line."
+    assigned_agents: [research_agent, orchestrator]
+
+  - task_id: automated_copper_processing
+    name: "Automated Copper Processing"
+    description: "Set up automated copper ore mining + smelting producing ≥3 copper-plate/min."
+    type: automate
+    target_entity: copper-plate
+    target_count: 3
+    time_limit_s: 1800
+    complexity_tier: 5
+    required_items: {}
+    hints:
+      - "Mirror the iron automation setup for copper."
+    assigned_agents: [orchestrator, resource_agent, blueprint_agent, logistics_agent]
+
+  - task_id: automate_science_production
+    name: "Automate Science Pack Production"
+    description: "Build an assembler-based line that produces automation-science-pack automatically at ≥1/min."
+    type: automate
+    target_entity: automation-science-pack
+    target_count: 1
+    time_limit_s: 2700
+    complexity_tier: 5
+    required_items: {}
+    hints:
+      - "Assembly machine 1 + inserters + input belts for copper-plate and iron-gear-wheel."
+      - "Needs electric power.  Set up steam power first."
+    assigned_agents: [orchestrator, blueprint_agent, logistics_agent, research_agent]
+
+  - task_id: research_multi_technology
+    name: "Research Multiple Technologies"
+    description: "Research Automation AND Logistics technologies in sequence."
+    type: research
+    target_entity: logistics
+    target_count: 1
+    time_limit_s: 3600
+    complexity_tier: 5
+    required_items: {}
+    hints:
+      - "Research Automation first (prerequisite for Logistics)."
+      - "Requires sustained science pack production between the two researches."
+    assigned_agents: [research_agent, orchestrator]
+
+  - task_id: factory_milestone
+    name: "Factory Milestone"
+    description: "Achieve simultaneous automated production of iron-plate, copper-plate, and automation-science-pack."
+    type: automate
+    target_entity: automation-science-pack
+    target_count: 10
+    time_limit_s: 5400
+    complexity_tier: 5
+    required_items: {}
+    hints:
+      - "This is the capstone task.  All specialist agents must cooperate."
+      - "Start with power, then mining, smelting, then assembly, then science."
+      - "Use reflection_agent to diagnose and fix any failures."
+    assigned_agents: [orchestrator, resource_agent, blueprint_agent, logistics_agent, research_agent, reflection_agent]

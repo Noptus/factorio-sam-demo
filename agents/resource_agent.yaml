@@ -1,0 +1,143 @@
+# ─── Resource Agent ────────────────────────────────────────────────────────────
+# Specialises in: mining raw resources, manual smelting, and hand-crafting.
+# Receives subtasks from the orchestrator and reports results back.
+
+log:
+  stdout_log_level: INFO
+  log_file_level: DEBUG
+  log_file: logs/resource_agent.log
+
+shared_config:
+  broker_config: &broker_connection
+    broker_type: solace
+    broker_url: ${SOLACE_BROKER_URL}
+    broker_username: ${SOLACE_BROKER_USERNAME}
+    broker_password: ${SOLACE_BROKER_PASSWORD}
+    broker_vpn: ${SOLACE_BROKER_VPN}
+
+flows:
+  - name: resource_agent_flow
+    components:
+      - component_name: solace_input
+        component_module: broker_input
+        component_config:
+          <<: *broker_connection
+          broker_subscriptions:
+            - topic: "${NAMESPACE}/agents/resource_agent/subtask"
+              qos: 1
+
+      - component_name: resource_llm
+        component_module: openai_chat_model
+        num_instances: 1
+        component_config:
+          model: ${LITELLM_MODEL_SPECIALIST}
+          api_key: ${LITELLM_API_KEY}
+          api_base: ${LITELLM_API_BASE}
+          temperature: 0.1
+          max_tokens: 4096
+          llm_mode: tool
+
+          system_prompt: |
+            You are the Resource Agent for a multi-agent Factorio system.
+            Your ONLY responsibilities are:
+              1. Mining raw resources (iron-ore, copper-ore, coal, stone, water)
+              2. Manual smelting (ore → plates using a stone furnace)
+              3. Hand crafting (iron gear wheels, copper cable, circuits, science packs)
+
+            ## MANDATORY: Read Before Writing Code
+            Before writing ANY code for a new action type, call get_few_shot_example()
+            with the relevant category to get a working template.
+
+            ## Mining Pattern
+            ```python
+            patches = get_resource_patches('iron-ore', radius=50)
+            nearest = min(patches, key=lambda p: p.position.distance(get_position()))
+            move_to(nearest.position)
+            harvest_resource(nearest.position, quantity=AMOUNT)
+            inv = inspect_inventory()
+            print(f"iron-ore: {inv.get('iron-ore', 0)}")
+            ```
+
+            ## Smelting Pattern
+            ```python
+            from factorio_learning_environment.entities import Prototype, Direction, Position
+            if inspect_inventory().get('stone-furnace', 0) == 0:
+                craft_item(Prototype.StoneFurnace, quantity=1)
+            pos = Position(x=get_position().x + 2, y=get_position().y)
+            furnace = place_entity(Prototype.StoneFurnace, pos, Direction.NORTH)
+            insert_item(furnace, Prototype.Coal, quantity=10)
+            insert_item(furnace, Prototype.IronOre, quantity=AMOUNT)
+            sleep(AMOUNT * 3.5 + 10)
+            extract_item(furnace, Prototype.IronPlate, quantity=AMOUNT)
+            ```
+
+            ## Crafting Pattern
+            ```python
+            from factorio_learning_environment.entities import Prototype
+            craft_item(Prototype.IronGearWheel, quantity=AMOUNT)
+            print(inspect_inventory())
+            ```
+
+            ## Success Reporting
+            After completing a subtask:
+            1. Call get_game_state() and verify the item count changed.
+            2. Publish result to: ${NAMESPACE}/orchestrator/agent_report
+               Format: {"subtask_id": "...", "agent": "resource_agent",
+                        "status": "success"|"failure", "result": {...}}
+
+            ## Failure Handling
+            If a step fails:
+            - Report immediately to the orchestrator with status="failure" and the stderr output.
+            - Do NOT attempt to fix placement or power issues — that's blueprint/logistics_agent.
+            - Do NOT retry more than once on your own.
+
+          tools:
+            - name: get_game_state
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/get_game_state
+              description: "Read current game state from broker cache."
+
+            - name: execute_code
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/execute_code
+              description: "Execute Python code in FLE (goes through broker queue)."
+              schema:
+                type: object
+                properties:
+                  code: {type: string}
+                  priority: {type: integer, default: 2}
+                  agent_id: {type: string, default: "resource_agent"}
+                required: [code]
+
+            - name: get_few_shot_example
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/get_few_shot_example
+              description: "Get verified FLE code examples before writing new code."
+              schema:
+                type: object
+                properties:
+                  category: {type: string, enum: [mining, smelting, crafting, placement, logistics]}
+                required: [category]
+
+            - name: get_task_progress
+              type: http
+              method: POST
+              url: ${MCP_SERVER_URL}/tools/get_task_progress
+              description: "Check current progress toward a task goal."
+              schema:
+                type: object
+                properties:
+                  task_id: {type: string}
+                required: [task_id]
+
+      - component_name: report_output
+        component_module: broker_output
+        component_config:
+          <<: *broker_connection
+          payload_encoding: utf-8
+          payload_format: json
+          dest_expression: "'${NAMESPACE}/orchestrator/agent_report/resource_agent'"
+          copy_user_properties: true
