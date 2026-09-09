@@ -1,4 +1,11 @@
-# Factorio SAM Demo — Multi-Agent FLE Benchmark System
+# Factorio SAM Demo - Multi-Agent FLE Benchmark System
+
+**Status: multi-agent integration prototype.** This repository explores coordination through Solace Agent Mesh, an MCP bridge, and a priority queue for actions in a shared Factorio world.
+
+Start with [the action broker](action_broker/broker.py) and [the MCP bridge](mcp_server/factorio_mcp.py). Model access and a compatible, licensed Factorio/FLE installation are external requirements. Running agents can incur model charges.
+
+No completed benchmark report or automated test suite is included in this checkout. Score targets and latency estimates below are development assumptions, not verified results from this system.
+
 
 A multi-agent Factorio playing system built with **Solace Agent Mesh (SAM)**
 and **LiteLLM**, targeting the FLE lab-play benchmark of **7/24 tasks** (best
@@ -72,7 +79,7 @@ published single-agent result) with a design goal of **15+ tasks**.
 
 ---
 
-## Why This Architecture Beats 7/24
+## Coordination hypotheses
 
 | Problem with single agents | Our solution |
 |---|---|
@@ -335,7 +342,7 @@ from factorio_learning_environment.entities import Prototype, Direction, Positio
 - Look at Solace Web UI → Try Me! tab to publish test messages
 
 ### `Cannot place entity` errors
-- This is the most common failure — the reflection_agent handles it
+- This is the most common failure - the reflection_agent handles it
 - Ensure blueprint_agent calls `get_game_state()` before placing to check for collisions
 
 ### LiteLLM 401 errors
@@ -344,7 +351,7 @@ from factorio_learning_environment.entities import Prototype, Direction, Positio
 
 ### Queue backed up (many pending actions)
 - Check `/health` on the broker for `queue_depth`
-- The single FLE worker may be stuck — check `broker.log` for timeout errors
+- The single FLE worker may be stuck - check `broker.log` for timeout errors
 - Restart the broker to clear stuck state
 
 ---
@@ -358,7 +365,7 @@ from factorio_learning_environment.entities import Prototype, Direction, Positio
 | Best published single agent | 7/24 |
 | **This system (target)** | **15+/24** |
 
-### Why we expect to exceed 7/24
+### Hypotheses to test
 1. **Parallel specialization**: Resource, blueprint, logistics, and research work concurrently on independent subtasks of the same task.
 2. **Error recovery loop**: The reflection_agent fixes code errors in-flight rather than failing the whole task.
 3. **Few-shot injection**: Agents receive tested, working code patterns before generating new code, drastically reducing syntax and API errors.
@@ -377,4 +384,4 @@ from factorio_learning_environment.entities import Prototype, Direction, Positio
 
 ## License
 
-MIT — see `LICENSE` file.  Factorio requires a valid game license for FLE use.
+No standalone LICENSE file is included in this checkout. Confirm reuse terms before redistribution. Factorio requires a valid game license for FLE use.
