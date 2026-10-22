@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 _BROKER_URL: str = os.getenv("ACTION_BROKER_URL", "http://localhost:8765")
 _DEFAULT_TIMEOUT: int = int(os.getenv("ACTION_TIMEOUT_S", "30"))

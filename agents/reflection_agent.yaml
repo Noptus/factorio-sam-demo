@@ -1,8 +1,7 @@
 # ─── Reflection Agent (Error Recovery Specialist) ────────────────────────────
 # Analyses failed actions, identifies root causes, generates corrected code,
-# and reports the fix back to the orchestrator.  This agent is critical for
-# exceeding the 7/24 benchmark — most single-agent failures come from code
-# errors that are fixable with targeted analysis.
+# and reports proposed fixes to the orchestrator. Uncertain outcomes require
+# state reconciliation before any action is repeated.
 
 log:
   stdout_log_level: INFO
@@ -40,6 +39,12 @@ flows:
           llm_mode: tool
 
           system_prompt: |
+            If an execution result has execution_uncertain=true, do not repeat it.
+            A timeout or communication error can occur after the game was changed.
+            The cached observation may be stale; pause and reconcile the actual game
+            state before proposing further mutations. Ask for human intervention
+            when the outcome cannot be established.
+
             You are the Reflection Agent — an error recovery specialist for a multi-agent
             Factorio system.  You receive failure reports from other agents and produce
             CORRECTED, WORKING code to retry the failed action.

@@ -5,7 +5,7 @@ Exposes Factorio game tools via the Model Context Protocol (MCP) and as plain
 REST endpoints.  SAM agents call these tools; the MCP server forwards every
 write operation through the Action Broker -- env.step() is NEVER called here.
 
-Start:  uvicorn mcp_server.factorio_mcp:app --port 8766 --host 0.0.0.0
+Start:  uvicorn mcp_server.factorio_mcp:app --port 8766 --host 127.0.0.1
 
 MCP JSON-RPC endpoint:  POST /mcp
 REST tool endpoints:
@@ -33,7 +33,10 @@ from pydantic import BaseModel, Field
 
 from action_broker import client as broker
 
-load_dotenv()
+_ROOT = pathlib.Path(__file__).resolve().parent.parent
+load_dotenv(_ROOT / ".env")
+_LOG_DIR = _ROOT / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 log = logging.getLogger("factorio_mcp")
 logging.basicConfig(
@@ -41,7 +44,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("logs/mcp_server.log"),
+        logging.FileHandler(_LOG_DIR / "mcp_server.log"),
     ],
 )
 
@@ -202,6 +205,7 @@ async def _tool_execute_code(
             "stdout": "",
             "stderr": str(exc),
             "elapsed_ms": 0,
+            "execution_uncertain": True,
             "hint": "The Action Broker may be down.  Run: uvicorn action_broker.broker:app --port 8765",
         }
 
@@ -214,6 +218,7 @@ async def _tool_execute_code(
             "stderr": stderr,
             "elapsed_ms": result.get("elapsed_ms", 0),
             "hint": hint,
+            "execution_uncertain": result.get("execution_uncertain", True),
         }
 
     return {
@@ -362,6 +367,9 @@ async def mcp_jsonrpc(request: Request) -> JSONResponse:
             {"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}, "id": None}
         )
 
+    if not isinstance(body, dict) or body.get("jsonrpc") != "2.0" or not isinstance(body.get("params", {}), dict):
+        return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"}, "id": None})
+
     req_id = body.get("id")
     method = body.get("method", "")
     params = body.get("params", {})
@@ -405,7 +413,7 @@ async def mcp_jsonrpc(request: Request) -> JSONResponse:
 
             result = {
                 "content": [{"type": "text", "text": json.dumps(tool_result, indent=2)}],
-                "isError": False,
+                "isError": tool_result.get("success") is False,
             }
 
         elif method == "notifications/initialized":
@@ -443,4 +451,4 @@ async def health() -> JSONResponse:
 # ─── Entrypoint ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("mcp_server.factorio_mcp:app", host="0.0.0.0", port=8766, reload=False)
+    uvicorn.run("mcp_server.factorio_mcp:app", host="127.0.0.1", port=8766, reload=False)

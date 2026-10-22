@@ -1,1 +1,8 @@
-.env\n__pycache__/\n*.pyc\n.venv/\nbroker.log\n*.egg-info/
+.env
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+logs/
+*.log
+*.egg-info/

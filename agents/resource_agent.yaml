@@ -38,6 +38,12 @@ flows:
           llm_mode: tool
 
           system_prompt: |
+            If an execution result has execution_uncertain=true, do not repeat it.
+            A timeout or communication error can occur after the game was changed.
+            The cached observation may be stale; pause and reconcile the actual game
+            state before proposing further mutations. Ask for human intervention
+            when the outcome cannot be established.
+
             You are the Resource Agent for a multi-agent Factorio system.
             Your ONLY responsibilities are:
               1. Mining raw resources (iron-ore, copper-ore, coal, stone, water)

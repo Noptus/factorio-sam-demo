@@ -6,20 +6,19 @@ env.step() calls.  Multiple SAM agents submit Python code snippets via HTTP;
 the broker executes them one at a time from an asyncio.PriorityQueue, caches
 the game state, and returns structured results.
 
-Start:  uvicorn action_broker.broker:app --port 8765 --host 0.0.0.0
+Start:  uvicorn action_broker.broker:app --port 8765 --host 127.0.0.1
 """
 from __future__ import annotations
 
 import asyncio
 import dataclasses
-import json
 import logging
 import os
 import time
-import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import Any, Optional
 
 import uvicorn
@@ -30,7 +29,10 @@ from pydantic import BaseModel, Field
 
 from .priority import Priority
 
-load_dotenv()
+_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_ROOT / ".env")
+_LOG_DIR = _ROOT / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 _LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
@@ -39,7 +41,7 @@ logging.basicConfig(
     format=_LOG_FORMAT,
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("logs/broker.log"),
+        logging.FileHandler(_LOG_DIR / "broker.log"),
     ],
 )
 log = logging.getLogger("action_broker")
@@ -110,7 +112,7 @@ class _QueueItem:
 
 
 # ─── Shared state ─────────────────────────────────────────────────────────────
-_queue: asyncio.PriorityQueue[_QueueItem]
+_queue: asyncio.PriorityQueue[_QueueItem] = asyncio.PriorityQueue()
 _results: dict[str, dict[str, Any]] = {}
 _game_state_cache: dict[str, Any] = {}
 _sequence_counter: int = 0
@@ -139,32 +141,35 @@ async def _worker() -> None:
         )
 
         t0 = time.monotonic()
+        # A game action is not idempotent. Never retry automatically: an
+        # exception or timeout does not establish that no effects occurred.
+        step_result = None
         last_exc: Exception | None = None
-
-        # Exponential backoff retry: 0 s, 1 s, 2 s, 4 s (max 3 retries)
-        for attempt, backoff in enumerate([0, 1, 2, 4]):
-            if backoff:
-                log.warning("Retry %d for action %s after %ds backoff", attempt, item.action_id, backoff)
-                await asyncio.sleep(backoff)
+        uncertain = False
+        step_future = loop.run_in_executor(_fle_executor, _fle_step, item.code)
+        try:
+            step_result = await asyncio.wait_for(asyncio.shield(step_future), timeout=item.timeout)
+        except asyncio.TimeoutError:
+            uncertain = True
+            last_exc = TimeoutError(
+                f"Action exceeded {item.timeout}s; execution may still complete. Not retried."
+            )
+            _results[item.action_id] = {
+                "status": "error", "stderr": str(last_exc), "execution_uncertain": True,
+                "elapsed_ms": int((time.monotonic() - t0) * 1000),
+            }
+            # Cancelling an asyncio wrapper cannot stop the blocking game call.
+            # Drain it before taking another command so state access stays serial.
             try:
-                step_future = loop.run_in_executor(
-                    _fle_executor,
-                    _fle_step,
-                    item.code,
-                )
-                step_result = await asyncio.wait_for(step_future, timeout=item.timeout)
-                break  # success
-            except asyncio.TimeoutError:
-                last_exc = TimeoutError(f"FLE step timed out after {item.timeout}s")
-                log.error("Timeout on action %s (attempt %d)", item.action_id, attempt)
-                # Cancel the underlying thread if possible (best-effort)
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                log.error("Error on action %s attempt %d: %s", item.action_id, attempt, exc)
-                if attempt == 3:
-                    break
-        else:
-            step_result = None
+                completed = await asyncio.shield(step_future)
+                if completed.get("observation"):
+                    _game_state_cache.update(completed["observation"])
+            except Exception:
+                log.exception("Timed-out action eventually failed: %s", item.action_id)
+        except Exception as exc:
+            last_exc = exc
+            uncertain = True
+            log.exception("Action failed without retry: %s", item.action_id)
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
@@ -191,7 +196,7 @@ async def _worker() -> None:
                 "reward": 0.0,
                 "done": False,
                 "elapsed_ms": elapsed_ms,
-                "traceback": traceback.format_exc(),
+                "execution_uncertain": uncertain,
             }
             log.error("FAIL | action=%s error=%s elapsed=%dms", item.action_id, error_msg, elapsed_ms)
 
@@ -202,9 +207,18 @@ async def _worker() -> None:
 # ─── Lifespan ─────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
-    global _env, _queue, _start_time, _worker_task
+    global _env, _queue, _start_time, _worker_task, _fle_executor
+    global _results, _game_state_cache, _sequence_counter, _current_agent
     _start_time = time.time()
-    _queue = asyncio.PriorityQueue()
+    capacity = int(os.getenv("MAX_QUEUE_DEPTH", "100"))
+    if capacity <= 0:
+        raise ValueError("MAX_QUEUE_DEPTH must be positive")
+    _queue = asyncio.PriorityQueue(maxsize=capacity)
+    _results = {}
+    _game_state_cache = {}
+    _sequence_counter = 0
+    _current_agent = "idle"
+    _fle_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fle-worker")
 
     # Initialise FLE in the dedicated executor thread
     loop = asyncio.get_running_loop()
@@ -214,11 +228,14 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     _worker_task = asyncio.create_task(_worker(), name="fle-worker")
     log.info("Action Broker ready on port 8765")
 
-    yield  # ── server runs ──
-
-    _worker_task.cancel()
-    _fle_executor.shutdown(wait=False)
-    log.info("Action Broker shut down.")
+    try:
+        yield
+    finally:
+        _worker_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _worker_task
+        _fle_executor.shutdown(wait=False, cancel_futures=True)
+        log.info("Action Broker shut down.")
 
 
 app = FastAPI(title="Factorio Action Broker", lifespan=lifespan)
@@ -226,9 +243,9 @@ app = FastAPI(title="Factorio Action Broker", lifespan=lifespan)
 
 # ─── Request / Response models ────────────────────────────────────────────────
 class ActionRequest(BaseModel):
-    agent_id: str = Field(..., description="Identifier of the submitting agent")
+    agent_id: str = Field(..., min_length=1, max_length=128, description="Identifier of the submitting agent")
     priority: int = Field(Priority.NORMAL, ge=0, le=3, description="0=EMERGENCY … 3=LOW")
-    code: str = Field(..., description="Python code to execute inside FLE")
+    code: str = Field(..., min_length=1, max_length=100_000, description="Python code to execute inside FLE")
     timeout: int = Field(30, ge=1, le=300, description="Per-action timeout in seconds")
 
 
@@ -245,6 +262,7 @@ class ResultResponse(BaseModel):
     elapsed_ms: int = 0
     reward: float = 0.0
     done: bool = False
+    execution_uncertain: bool = False
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -266,8 +284,11 @@ async def submit_action(req: ActionRequest) -> ActionResponse:
         timeout=req.timeout,
     )
 
+    try:
+        _queue.put_nowait(item)
+    except asyncio.QueueFull as exc:
+        raise HTTPException(status_code=429, detail="Action queue is full; no action was accepted") from exc
     _results[action_id] = {"status": "queued", "stdout": "", "stderr": "", "elapsed_ms": 0}
-    await _queue.put(item)
 
     position = _queue.qsize()
     log.info(
@@ -293,6 +314,7 @@ async def get_result(action_id: str) -> ResultResponse:
         elapsed_ms=data.get("elapsed_ms", 0),
         reward=data.get("reward", 0.0),
         done=data.get("done", False),
+        execution_uncertain=data.get("execution_uncertain", False),
     )
 
 
@@ -329,4 +351,4 @@ async def metrics() -> JSONResponse:
 
 # ─── Entrypoint ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    uvicorn.run("action_broker.broker:app", host="0.0.0.0", port=8765, reload=False)
+    uvicorn.run("action_broker.broker:app", host="127.0.0.1", port=8765, reload=False)
